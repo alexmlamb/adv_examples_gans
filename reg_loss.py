@@ -33,8 +33,8 @@ def gan_loss(pre_sig, real, D=True, use_penalty=False,grad_inp=None,gamma=1.0,bg
         gv = 0.0
 
     if real == True and D == True:
-        cl = -torch.log(p).mean()
- 
+        cl = -torch.log(p + 0.001).mean()
+
         if use_penalty:
             penalty = (gv).mean()#((1 - p)**2 * gv).mean()
         else:
@@ -45,7 +45,7 @@ def gan_loss(pre_sig, real, D=True, use_penalty=False,grad_inp=None,gamma=1.0,bg
 
         loss = cl + penalty*gamma
     elif real == False and D == True:
-        cl = -torch.log(1-p).mean()
+        cl = -torch.log(1-p + 0.001).mean()
 
         if use_penalty:
             penalty = (gv).mean()#(p**2 * gv).mean()
@@ -63,7 +63,7 @@ def gan_loss(pre_sig, real, D=True, use_penalty=False,grad_inp=None,gamma=1.0,bg
         if bgan:
             loss = (torch.log(p/(1-p))**2).mean()
         else:
-            loss = -torch.log(1-p).mean()
+            loss = -torch.log(1-p + 0.001).mean()
 
     elif real == False and D == False:
         assert grad_inp is None
@@ -72,7 +72,7 @@ def gan_loss(pre_sig, real, D=True, use_penalty=False,grad_inp=None,gamma=1.0,bg
         if bgan:
             loss = (torch.log(p/(1-p))**2).mean()
         else:
-            loss = -torch.log(p).mean()
+            loss = -torch.log(p + 0.001).mean()
 
     if compute_penalty:
         return loss, (gv).mean()
