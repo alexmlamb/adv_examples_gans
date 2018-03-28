@@ -30,9 +30,9 @@ parser.add_argument('--epsilon', type=float, default=0.3)
 parser.add_argument('--epsilon_decay', type=float, default=0.0)
 parser.add_argument('--gamma', type=float, default=10.0)
 parser.add_argument('--adv_weight', type=float, default=1.0)
-parser.add_argument('--attacktype', type=str, default="fgsm")
-parser.add_argument('--adv_iterations', type=float, default=1)
-parser.add_argument('--step_size', type=float, default=0.3)
+parser.add_argument('--attacktype', type=str, default="pgd")
+parser.add_argument('--adv_iterations', type=float, default=40)
+parser.add_argument('--step_size', type=float, default=0.01)
 #parser.add_argument('--gan_type', type=str, default='roth', choices = ('roth', 'lsgan'))
 #parser.add_argument('--model_levels', type=list, default=[4,32], choices = ([4],[4,32]))
 #parser.add_argument('--compute_inception_score', type=bool, default=True)
@@ -68,9 +68,10 @@ def gen_adv_example(classifier, x, loss_func, epsilon_use, attack_type="pgd"):
     elif attack_type == "fgsm":
         return gen_adv_example_fgsm(classifier, x, loss_func, epsilon_use)
 
-transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean=(0.5,0.5,0.5), std=(0.5,0.5,0.5))])
+transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean=(0.0,0.0,0.0), std=(1.0,1.0,1.0))])
 
 mnist = datasets.MNIST(root='./data/', train=True, download=True, transform=transform)
+mnist_test = datasets.MNIST(root='./data/', train=False, download=True, transform=transform)
 imglen = 28
 imgchan = 1
 
@@ -80,6 +81,7 @@ imgchan = 1
 inpdim = imglen*imglen*imgchan
 
 data_loader = torch.utils.data.DataLoader(dataset=mnist, batch_size=100, shuffle=True)
+data_loader_test = torch.utils.data.DataLoader(dataset=mnist_test, batch_size=100, shuffle=True)
 
 nll = nn.CrossEntropyLoss()
 
@@ -87,8 +89,6 @@ from networks import Disc
 
 from Classifier import Cl
 
-C = Cl()
-C.cuda()
 D = Disc(784)
 
 # Generator 
@@ -100,14 +100,14 @@ G = nn.Sequential(
     #nn.BatchNorm1d(512),
     nn.LeakyReLU(0.2),
     nn.Linear(512, inpdim),
-    nn.Tanh())
+    nn.Sigmoid())
 
 
 if torch.cuda.is_available():
     D = D.cuda()
     G = G.cuda()
 
-c_optimizer = torch.optim.Adam(C.parameters(), lr=0.0001, betas=(0.9,0.99))
+#c_optimizer = torch.optim.Adam(C.parameters(), lr=0.0001, betas=(0.9,0.99))
 d_optimizer = torch.optim.Adam(D.parameters(), lr=0.0001, betas=(0.9,0.99))
 g_optimizer = torch.optim.Adam(G.parameters(), lr=0.0001, betas=(0.9,0.99))
 
@@ -132,25 +132,22 @@ for epoch in range(200):
 
         true_labels = to_var(true_labels,False)
 
-        y_label_pred_real = C(images)
-        #outputs, y_label_pred_real = D(images)
+        outputs, y_label_pred_real = D(images)
         #d_loss_real,grad_p_real = gan_loss(pre_sig=outputs, real=True, D=True, use_penalty=args.use_penalty,grad_inp=images,gamma=args.gamma)
         
         class_loss, class_acc = D.compute_loss_acc(y_label_pred_real, true_labels)
+
         acc_class_clean.append(class_acc)
 
         #image_class_adv, _ = gen_adv_example(D.label_classifier, images, lambda cval: (D.nll_loss(cval, true_labels).mean(),None), epsilon_use, args.attacktype)
         ##image_class_adv = images + 0.03 * torch.sign(grad(D.nll_loss(y_label_pred_real, true_labels).mean(),images,retain_graph=True)[0])
         ##pred_labels = D.label_classifier(image_class_adv)
        
-        x_fgsm,_ = gen_adv_example_fgsm(C, images, lambda p: (nll(p, true_labels),None),0.03)
-        #x_grad = grad(nll_loss, images)[0]
-        #x_fgsm = images + torch.sign(x_grad)*0.3
-        pred = C(x_fgsm)
-        _, label_pred = torch.max(pred.data, 1)
-        class_acc_adv_curr = label_pred.eq(true_labels.data.view_as(label_pred)).cpu().double().mean()
+        image_class_adv,_ = gen_adv_example(D.label_classifier, images, lambda p: (nll(p, true_labels),None),args.epsilon)
 
-        #class_loss_adv, class_acc_adv_curr = D.compute_loss_acc(pred_labels, true_labels)
+        pred_labels = D.label_classifier(image_class_adv)
+
+        class_loss_adv, class_acc_adv_curr = D.compute_loss_acc(pred_labels, true_labels)
         acc_class_adv.append(class_acc_adv_curr)
 
         #real_score = outputs
@@ -165,11 +162,11 @@ for epoch in range(200):
 
         #fake_score = outputs
 
-        d_loss = class_loss#d_loss_real*0.0 + d_loss_fake*0.0 + class_loss + class_loss_adv*0.0
+        d_loss = class_loss + -10.0*grad(y_label_pred_real.mean(), images,create_graph=True)[0].norm(2)#d_loss_real*0.0 + d_loss_fake*0.0 + class_loss + class_loss_adv*0.0
 
-        C.zero_grad()
+        D.zero_grad()
         d_loss.backward(retain_graph=True)
-        c_optimizer.step()
+        d_optimizer.step()
 
         #acc_clean.append(0.5*((fake_score < 0.0).type(torch.FloatTensor).mean() + (real_score > 0.0).type(torch.FloatTensor).mean()))
 
@@ -208,12 +205,33 @@ for epoch in range(200):
         #g_loss.backward()
         #g_optimizer.step()
 
+    acc_class_clean_test = []
+    acc_class_adv_test = []
+    grad_penalty_lst = []
+
+    #print "epsilon current", epsilon_use
+
+    for i, (images, true_labels) in enumerate(data_loader_test):
+        batch_size = images.size(0)
+        images = to_var(images.view(batch_size, -1))
+        true_labels = to_var(true_labels,False)
+        outputs, y_label_pred_real = D(images)
+        class_loss, class_acc = D.compute_loss_acc(y_label_pred_real, true_labels)
+        acc_class_clean_test.append(class_acc)
+        image_class_adv,_ = gen_adv_example(D.label_classifier, images, lambda p: (nll(p, true_labels),None),args.epsilon)
+        pred_labels = D.label_classifier(image_class_adv)
+        class_loss_adv, class_acc_adv_curr = D.compute_loss_acc(pred_labels, true_labels)
+        acc_class_adv_test.append(class_acc_adv_curr)
+
     print "Epoch", epoch
     #print "Discriminator clean accuracy", sum(acc_clean)/len(acc_clean)
     #print "Discriminator adv accuracy", sum(acc_adv)/len(acc_adv)
-    print "Classifier clean accuracy", sum(acc_class_clean) / len(acc_class_clean)
-    print "Classifier adv accuracy", sum(acc_class_adv) / len(acc_class_adv)
-    #print "Gradient Norm", sum(grad_penalty_lst)/len(grad_penalty_lst)
+    print "Classifier Train clean accuracy", sum(acc_class_clean) / len(acc_class_clean)
+    print "Classifier Train adv accuracy", sum(acc_class_adv) / len(acc_class_adv)
+    print "Classifier Test clean accuracy", sum(acc_class_clean_test) / len(acc_class_clean_test)
+    print "Classifier Test adv accuracy", sum(acc_class_adv_test) / len(acc_class_adv_test)    
+
+#print "Gradient Norm", sum(grad_penalty_lst)/len(grad_penalty_lst)
 
 
     #fake_images = fake_images_D.view(fake_images_D.size(0), imgchan, imglen, imglen)
