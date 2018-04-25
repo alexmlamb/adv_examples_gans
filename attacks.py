@@ -14,14 +14,17 @@ def gen_adv_example_fgsm(classifier, x, loss_func,epsilon):
     x_adv = x
     total_loss = 0.0
 
-    c = classifier(x_adv)
-    loss,_ = loss_func(c) # gan_loss(c, is_real,compute_penalty=False)
+    c_pre = classifier(x_adv)
+    loss,_ = loss_func(c_pre) # gan_loss(c, is_real,compute_penalty=False)
     nx_adv = x_adv + epsilon*torch.sign(grad(loss, x_adv,retain_graph=True)[0])
     x_adv = to_var(nx_adv.data)
 
+    x_adv = torch.clamp(x_adv, 0.0, 1.0)
+
     c = classifier(x_adv)
     loss,_ = loss_func(c)#gan_loss(c, is_real,compute_penalty=False)
-    total_loss += loss
+    
+    total_loss = ((c - c_pre)**2).mean()
 
     return x_adv, total_loss
 
